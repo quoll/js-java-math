@@ -52,6 +52,7 @@ const TWO = BigInteger.valueOf(2);
 const NEGATIVE_ONE = BigInteger.valueOf(-1);
 const TEN = BigInteger.valueOf(10);
 
+// This is used by the String constructor of BigInteger
 const bitsPerDigit = [
     0, 0,
     1024, 1624, 2048, 2378, 2648, 2875, 3072, 3247, 3402, 3543, 3672,
@@ -84,7 +85,7 @@ function checkFromIndexSize(fromIndex, size, length) {
     }
 }
 
-function stripLeaadingZeroBytes(mag, offset, length) {
+function stripLeadingZeroBytes(mag, offset, length) {
     const indexBound = offset + length;
 
     // Find first nonzero byte
@@ -118,24 +119,17 @@ function multiplyCarryInt(a, b, carry) {
     const bl = 0xFFFF & b;
     const bh = b >>> 16;
 
-    const carryl = 0xFFFF & carry;
-    const carryh = carry >>> 16;
-
     const blal = bl * al;
     const blah = bl * ah;
     const bhal = bh * al;
     const bhah = bh * ah;
 
-    var p0 = (blal & 0xFFFF) + carryl;
-    var p1 = (blah & 0xFFFF) + (bhal & 0xFFFF) + (p0 >>> 16) + carryh;
+    var p0 = blal + carry;
+    var p1 = blah + bhal + (p0 >>> 16);
     p0 &= 0xFFFF;
-    var p2 = (bhah & 0xFFFF) + (blah >>> 16) + (bhal >>> 16) + (p1 >>> 16);
+    var p32 = bhah + (p1 >>> 16);
     p1 &= 0xFFFF;
-    var p3 = (bhah >>> 16) + (p2 >>> 16);
-    p2 &= 0xFFFF;
-    if (p3 >>> 16 !== 0) throw new ArithmeticException(`Unexpected overflow while multiplying ${a} * ${c} (carry: ${carry})`);
-    p3 &= 0xFFFF;
-    return [p3 << 16 | p2, p1 << 16 | p0];
+    return [p32, p1 << 16 | p0];
 }
 
 /**
@@ -213,6 +207,10 @@ class BigInteger {
     #lowestSetBitPlusTwo;
     #firstNonzeroIntNumPlusTwo;
   
+    /**
+     * @param {number} signum  Contains a number representing the sign of the integer. May only be one of: [-1, 0 1]
+     * @param {number[]} magnitude  An array of 32-bit integers containing the full value of the BigInteger.
+     */
     constructor(signum, magnitude) {
         if (signum < -1 || signum > 1) {
             throw new NumberFormatException('Invalid signum value');
@@ -234,13 +232,16 @@ class BigInteger {
         if (mag.length >= MAX_MAG_LENGTH) BigInteger.checkRange(#mag);
     }
 
+    /**
+     * @returns {number[]} The internal magnitude array.
+     */
     get mag() { return this.#mag; }
 
     static fromSlice(signum, magnitude, offset, len) {
         return new BigInteger(signum, magnitude.slice(offset, offset + len));
     }
 
-    static fromString(value, radix) {
+    static fromString(value, radix = 10) {
         var cursor = 0, numDigits;
         const len = value.length;
 
@@ -309,7 +310,14 @@ class BigInteger {
         }
     }
 
+    /**
+     * Creates a randomly generated BigInteger.
+     */
+    static randomValue(numBits) {
+    }
+
     static valueOf(n) {
+        // todo
         return new BigInteger(n.toString);
     }
 }
