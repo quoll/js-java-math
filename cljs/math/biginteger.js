@@ -105,7 +105,13 @@ function stripLeaadingZeroBytes(mag, offset, length) {
     return result;
 }
 
-// multiple 2 32-bit values, and add in a carry that is up to 16-bits
+/**
+ * Multiply a pair of 32-bit values, and add in a carry that is up to 16-bits
+ * @param {number} a  The first 32-bit integer to multiply.
+ * @param {number} b  The second 32-bit integer to multiply.
+ * @param {number} carry  A 32-bit "carry" value to be added to the result.
+ * @return {number[]} A pair of 32-bit values representing the high and low words of the 64-bit result.
+ */
 function multiplyCarryInt(a, b, carry) {
     const al = 0xFFFF & a
     const ah = a >>> 16;
@@ -182,6 +188,12 @@ function trustedStripLeadingZeroInts(value) {
     return keep === 0 ? value : value.slice(keep, vlen);
 }
 
+/**
+ * Throws an ArithmeticException if the BigInteger would be
+ * out of the supported range.
+ *
+ * @throws {ArithmeticException} if this exceeds the supported range.
+ */
 function check(mag) {
     if (mag.length > MAX_MAG_LENGTH || mag.length == MAX_MAG_LENGTH && mag[0] < 0) {
         reportOverflow();
