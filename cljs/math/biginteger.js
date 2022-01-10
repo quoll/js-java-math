@@ -28,7 +28,7 @@
  * arbitrary-precision integers.
  */
 
-const LONG_MASK = 0xffffffffL;
+const LONG_MASK = 0xffffffff;
 const MAX_MAG_LENGTH = 0x80000000 / 32;
 const PRIME_SEARCH_BIT_LENGTH_LIMIT = 500000000;
 const KARATSUBA_THRESHOLD = 80;
@@ -46,11 +46,18 @@ const MAX_INT = 0x7FFFFFFF;
 const MIN_INT = 0x80000000 | 0;
 const TWO_32 = INT_MASK + 1;
 
-const ZERO = new BigInteger([0], 0);
-const ONE = BigInteger.valueOf(1);
-const TWO = BigInteger.valueOf(2);
-const NEGATIVE_ONE = BigInteger.valueOf(-1);
-const TEN = BigInteger.valueOf(10);
+// forward declaration of BigInteger values
+var _ZERO;
+var _ONE;
+var _TWO;
+var _NEGATIVE_ONE;
+var _TEN;
+
+var _SMALL_PRIME_PRODUCT;
+
+const MAX_CONSTANT = 16;
+const posConst = new Array(MAX_CONSTANT + 1);
+const negConst = new Array(MAX_CONSTANT + 1);
 
 // This is used by the String constructor of BigInteger
 const bitsPerDigit = [
@@ -85,6 +92,14 @@ function checkFromIndexSize(fromIndex, size, length) {
     }
 }
 
+/**
+ * Returns a cope of the input array stripped of any leading zero bytes.
+ * Converts the byte array into an array of 32-bit integers.
+ * @param {number[]} mag  The array of bytes to process.
+ * @param {number} offset  The offset into the array to start processing.
+ * @param {number} length  The number of bytes to process from the array.
+ * @returns {number[]} An array of 32-bit integers with packed values from the initial bytes.
+ */
 function stripLeadingZeroBytes(mag, offset, length) {
     const indexBound = offset + length;
 
@@ -128,7 +143,7 @@ function multiplyCarryInt(a, b, carry) {
     var p1 = blah + bhal + (p0 >>> 16);
     p0 &= 0xFFFF;
     var p32 = bhah + (p1 >>> 16);
-    p1 &= 0xFFFF;
+    // p1 &= 0xFFFF;
     return [p32, p1 << 16 | p0];
 }
 
@@ -139,7 +154,7 @@ function multiplyCarryInt(a, b, carry) {
 function unsignedLonger(n) {
     if (n >= 0) return n;
     if (n < MIN_INT) throw new RangeError(`Value ${n} is outside of unsigned int range`);
-    return n & MAX_INT + 0x80000000;
+    return (n & MAX_INT) + 0x80000000;
 }
 
 /**
@@ -153,16 +168,15 @@ function destructiveMulAdd(x, y, z) {
 
     var product_low = 0;
     var carry = 0;
-    for (int i = len - 1; i >= 0; i--) {
-        [carry, product_low] = multiplyCarryInt(y, x[i], carry);
-        x[i] = product_low;
+    for (var i = len - 1; i >= 0; i--) {
+        [carry, x[i]] = multiplyCarryInt(y, x[i], carry);
     }
 
     // Perform the addition
     var sum = unsignedLonger(x[len - 1]) + unsignedLonger(z);
     x[len - 1] = sum & INT_MASK;
     carry = Math.floor(sum / TWO_32);  // equivalent to >>>32
-    for (int i = len - 2; i >= 0; i--) {
+    for (var i = len - 2; i >= 0; i--) {
         sum = unsignedLonger(x[i]) + carry;
         x[i] = sum & INT_MASK;
         carry = Math.floor(sum / TWO_32);
@@ -171,15 +185,18 @@ function destructiveMulAdd(x, y, z) {
 
 /**
  * Returns the input array stripped of any leading zero bytes.
- * Since the source is trusted the copying may be skipped.
+ * If the source is trusted then the copying may be skipped.
+ * @param {number[]} value  The integer array to strip zeros from.
+ * @param {boolean} trusted  Indicates if the value array can be trusted not to change.
+ * @param {number[]} An integer array with no leading zeros. This may be the original array.
  */
-function trustedStripLeadingZeroInts(value) {
+function stripLeadingZeroInts(value, trusted = false) {
     const vlen = value.length;
 
     // Find first nonzero byte
     for (var keep = 0; keep < vlen && value[keep] == 0; keep++);
 
-    return keep === 0 ? value : value.slice(keep, vlen);
+    return trusted && keep === 0 ? value : value.slice(keep, vlen);
 }
 
 /**
@@ -188,16 +205,79 @@ function trustedStripLeadingZeroInts(value) {
  *
  * @throws {ArithmeticException} if this exceeds the supported range.
  */
-function check(mag) {
+function checkRange(mag) {
     if (mag.length > MAX_MAG_LENGTH || mag.length == MAX_MAG_LENGTH && mag[0] < 0) {
         reportOverflow();
     }
 }
 
+/**
+ * Throws an ArithmeticException with a consistent error message for reporting an overflow.
+ * @throws {ArithmeticException} always.
+ */
 function reportOverflow() {
     throw new ArithmeticException('BigInteger would overflow supported range');
 }
 
+/**
+ * Creates an integer array with numBits of random bits, 8 bits per integer.
+ * @param {number} numBits  The number of random bits to generate.
+ * @returns {number[]} The array containing 8 bit integers of random bits.
+ * TODO: add optional certainty argument for probable prime generation.
+ */
+function randomBits(numBits) {
+    if (numBits < 0) throw new RangeError('numBits myst be non-negative');
+    var numInts = Math.floor((numBits + 31) / 32);
+    var randomBits = new Uint32Array(numInts);
+    if (numInts > 0) {
+        var crpt = (typeof self === 'undefined') ? global.crypto.webcrypto : self.crypto;
+        crpt.getRandomValues(randomBits);
+        var excessBits = 32 * numInts - numBits;
+        randomBits[0] &= (1 << (32 - excessBits)) - 1;
+    }
+    return randomBits;
+}
+
+/**
+ * Adds the contents of the int arrays x and y. Allocates a new int array to hold the answer
+ * and returns a reference to that array.
+ * @param {number[]} x The first int array to add.
+ * @param {number[]} y The second int array to add.
+ */
+function addMagnitudes(x, y) {
+    if (x.length < y.length) [x, y] = [y, x];
+    var xIndex = x.length;
+    var yIndex = y.length;
+    const result = new Array(xIndex);
+    var sum = 0;
+    if (yIndex === 1) {
+        sum = unsignedLonger(x[--xIndex]) + unsignedLonger(y[0]);
+        result[xIndex] = sum;
+    } else {
+        // Add common parts of both numbers
+        while (yIndex > 0) {
+            sum = unsignedLonger(x[--xIndex]) + unsignedLonger(y[--yIndex]) + Math.floor(sum / TWO_32);
+            result[xIndex] = sum & INT_MASK;
+        }
+    }
+    // Copy remainder of longer number while carry propagation is required
+    var carry = (sum >= TWO_32);
+    while (xIndex > 0 && carry) {
+        sum = unsignedLonger(x[--xIndex]) + 1;
+        result[xIndex] = sum & INT_MASK;
+        carry = (sum >= TWO_32);
+    }
+    // Copy remainder of longer number
+    while (xIndex > 0) result[--xIndex] = x[xIndex];
+    // Grow result if necessary
+    if (carry) {
+        var newResult = new Array(result.length + 1);
+        for (var i = 0; i < result.length; i++) newResult[i + 1] = result[i];
+        newResult[0] = 1;
+        return newResult;
+    }
+    return result;
+}
 
 class BigInteger {
     #signum;
@@ -207,6 +287,21 @@ class BigInteger {
     #lowestSetBitPlusTwo;
     #firstNonzeroIntNumPlusTwo;
   
+    // static initialization of constant values.
+    // These values are all vars, but are invisible outside this file, except through static getters.
+    static {
+        for (var i = 1; i <= MAX_CONSTANT; i++) {
+            posConst[i] = new BigInteger(1, [i]);
+            negConst[i] = new BigInteger(-1, [i]);
+        }
+        _ZERO = new BigInteger(0, []);
+        _ONE = BigInteger.valueOf(1);
+        _TWO = BigInteger.valueOf(2);
+        _NEGATIVE_ONE = BigInteger.valueOf(-1);
+        _TEN = BigInteger.valueOf(10);
+        _SMALL_PRIME_PRODUCT = new BigInteger(1, [0x8a5b, 0x6470af95])
+    }
+
     /**
      * @param {number} signum  Contains a number representing the sign of the integer. May only be one of: [-1, 0 1]
      * @param {number[]} magnitude  An array of 32-bit integers containing the full value of the BigInteger.
@@ -215,27 +310,42 @@ class BigInteger {
         if (signum < -1 || signum > 1) {
             throw new NumberFormatException('Invalid signum value');
         }
-        checkFromIndexSize(0, magnitude.length, magnitude);
-        magnitude.forEach((item) => {
-            if (item > MAX_INT || item < MIN_INT) {
-                throw NumberFormatException('Magnitude array must be 32 bit integer values');
+        if (magnitude.length <= 1) {
+            // declaration of constants
+            if ((magnitude.length === 0 && signum !== 0) || (magnitude.length === 1 && signum === 0)) {
+                throw new NumberFormatException('Invalid signum value');
             }
-        });
-        
-        this.#mag = BigInteger.stripLeadingZeroBytes(magnitude, 0, magnitude.length);
-        if (this.#mag.length == 0) {
-            this.#signum = 0;
-        } else {
-            if (signum == 0) throw new NumberFormatException('signum-magnitude mismatch');
             this.#signum = signum;
+            this.#mag = magnitude;
+        } else {
+            checkFromIndexSize(0, magnitude.length, magnitude);
+            magnitude.forEach((item) => {
+                if (item > MAX_INT || item < MIN_INT) {
+                    throw NumberFormatException('Magnitude array must be 32 bit integer values');
+                }
+            });
+            
+            this.#mag = stripLeadingZeroInts(magnitude);
+            if (this.#mag.length == 0) {
+                this.#signum = 0;
+            } else {
+                if (signum === 0) throw new NumberFormatException('signum-magnitude mismatch');
+                this.#signum = signum;
+            }
+            if (this.#mag.length >= MAX_MAG_LENGTH) checkRange(this.#mag);
         }
-        if (mag.length >= MAX_MAG_LENGTH) BigInteger.checkRange(#mag);
     }
 
     /**
      * @returns {number[]} The internal magnitude array.
      */
     get mag() { return this.#mag; }
+
+    static get ZERO() { return _ZERO; };
+    static get ONE() { return _ONE; };
+    static get TWO() { return _TWO; };
+    static get NEGATIVE_ONE() { return _NEGATIVE_ONE; };
+    static get TEN() { return _TEN; };
 
     static fromSlice(signum, magnitude, offset, len) {
         return new BigInteger(signum, magnitude.slice(offset, offset + len));
@@ -304,7 +414,7 @@ class BigInteger {
             destructiveMulAdd(magnitude, superRadix, groupVal);
         }
         // Required for cases where the array was overallocated.
-        mag = trustedStripLeadingZeroInts(magnitude);
+        mag = stripLeadingZeroInts(magnitude, true);
         if (mag.length >= MAX_MAG_LENGTH) {
             checkRange();
         }
@@ -314,11 +424,49 @@ class BigInteger {
      * Creates a randomly generated BigInteger.
      */
     static randomValue(numBits) {
+        var magnitude = randomBits(numBits);
+        magnitude = stripLeadingZeroBytes(magnitude, 0, magnitude.length);
+        var signum = 1;
+        if (magnitude.length === 0) signum = 0;
+        if (magnitude.length >= MAX_MAG_LENGTH) checkRange();
+        return new BigInteger(signum, magnitude);
     }
 
     static valueOf(n) {
-        // todo
-        return new BigInteger(n.toString);
+        if (n === 0) return ZERO;
+        if (n > 0 && n <= MAX_CONSTANT) {
+            return posConst[val];
+        } else {
+            return negConst[-val];
+        }
+        var signum = 1;
+        if (n < 0) {
+            n = -n;
+            signum = -1;
+        }
+        return new BigInteger(signum, [n]);
+    }
+
+    #addBigInteger(val) {
+        if (val.#signum === 0) return this;
+        if (this.#signum === 0) return val;
+        if (this.#signum === val.#signum) {
+            return new BigInteger(this.#signum, addMagnitudes(this.#mag, val.#mag));
+        }
+    }
+
+    #addInteger(val) {
+
+    }
+
+    add(val) {
+        if (val instanceof BigInteger) {
+            return this.#addBigInteger(val);
+        } else if (typeof val === 'number') {
+            return this.#addInteger(val);
+        } else {
+            throw new TypeError('Invalid argument type');
+        }
     }
 }
 
