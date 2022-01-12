@@ -45,6 +45,7 @@ const INT_MASK = 0xFFFFFFFF;
 const MAX_INT = 0x7FFFFFFF;
 const MIN_INT = 0x80000000 | 0;
 const TWO_32 = INT_MASK + 1;
+const LOG_TWO = Math.log(2);
 
 // forward declaration of BigInteger values
 var _ZERO;
@@ -58,6 +59,9 @@ var _SMALL_PRIME_PRODUCT;
 const MAX_CONSTANT = 16;
 const posConst = new Array(MAX_CONSTANT + 1);
 const negConst = new Array(MAX_CONSTANT + 1);
+
+const powerCache = new Array(MAX_RADIX + 1);
+const logCache = new Array(MAX_RADIX + 1);
 
 // This is used by the String constructor of BigInteger
 const bitsPerDigit = [
@@ -261,11 +265,11 @@ function addMagnitudes(x, y) {
         }
     }
     // Copy remainder of longer number while carry propagation is required
-    var carry = (sum >= TWO_32);
+    var carry = (sum > INT_MASK);
     while (xIndex > 0 && carry) {
         sum = unsignedLonger(x[--xIndex]) + 1;
         result[xIndex] = sum & INT_MASK;
-        carry = (sum >= TWO_32);
+        carry = (sum > INT_MASK);
     }
     // Copy remainder of longer number
     while (xIndex > 0) result[--xIndex] = x[xIndex];
@@ -277,6 +281,118 @@ function addMagnitudes(x, y) {
         return newResult;
     }
     return result;
+}
+
+/**
+ * Subtracts the contents of the int arrays x and y. Allocates a new int array to hold the answer.
+ * @param {number[]} big The first int array to subtract.
+ * @param {number[]} little The second int array to subtract. This must be shorted than the big array.
+ */
+function subtractMagnitudes(big, little) {
+    if (big.length < little.length) throw new RangeError('big array must be longer than little array');
+    var bigIndex = big.length;
+    var littleIndex = little.length;
+    const result = new Array(bigIndex);
+    var difference = 0;
+    if (littleIndex === 1) {
+        difference = unsignedLonger(big[--bigIndex]) - unsignedLonger(little[0]);
+        result[bigIndex] = difference & INT_MASK;
+    } else {
+        // Subtract common parts of both numbers
+        while (littleIndex > 0) {
+            difference = unsignedLonger(big[--bigIndex]) - unsignedLonger(little[--littleIndex]) + Math.floor(difference / TWO_32);
+            result[bigIndex] = difference & INT_MASK;
+        }
+    }
+    // Subtract remainder of longer number while borrow propagates
+    var borrow = (difference > INT_MASK);
+    while (bigIndex > 0 && borrow) {
+        difference = (unsignedLonger(big[--bigIndex]) - 1) & INT_MASK;
+        result[bigIndex] = difference;
+        borrow = difference === -1;
+    }
+    // Copy remainder of longer number
+    while (bigIndex > 0) result[--bigIndex] = big[bigIndex];
+    // Get rid of leading zeros
+    return stripLeadingZeroInts(result, true);
+}
+
+/**
+ * Compares the contents of the int arrays x and y.
+ * @param {number[]} x The first int array to compare.
+ * @param {number[]} y The second int array to compare.
+ */
+function compareMagnitudes(x, y) {
+    const xIndex = x.length;
+    const yIndex = y.length;
+    if (xIndex === yIndex) {
+        for (var i = 0; i < xIndex; i++) {
+            if (x[i] !== y[i]) return unsignedLonger(x[i]) < unsignedLonger(y[i]) ? -1 : 1;
+        }
+        return 0;
+    }
+    return xIndex < yIndex ? -1 : 1;
+}
+
+/**
+ * Counts the number of bits set to 1 in the integer n.
+ * @param {number} n  A 32-bit integer.
+ * @returns The number of bits set to 1 in the integer n, from 0 to 32.
+ */
+function bitCount(n) {
+    n = n - ((n >> 1) & 0x55555555);
+    n = (n & 0x33333333) + ((n >> 2) & 0x33333333);
+    return ((n + (n >> 4) & 0xF0F0F0F) * 0x1010101) >> 24;
+}
+
+/**
+ * Returns the length of the bits required to represent the integer n in binary.
+ * @param {number} n A 32-bit integer.
+ * @returns The shortest number of bits required to represent the integer n in binary.
+ */
+function bitLengthForInt(n) {
+    return 32 - (n | 0).toString(2).length;
+}
+
+/**
+ * Returns the value radix^(2^exponent) from the cache.
+ * If this value doesn't already exist int he cache, it is added.
+ * @param {number} radix The base of the power.
+ * @param {number} exponent The exponent of the power.
+ * @returns radix^(2^exponent)
+ */
+function getRadixConversionCache(radix, exponent) {
+    var cacheLine = powerCache[radix];
+    if (exponent < cacheLine.length) return cacheLine[exponent];
+
+    newCacheLine = new Array(exponent + 1);
+    for (var i = 0; i < cacheLine.length; i++) newCacheLine[i] = cacheLine[i];
+    for (; i < newCacheLine.length; i++) {
+        cacheLine[i] = cacheLine[i - 1].pow(2);
+    }
+    
+    if (exponent >= powerCache[radix].length) {
+        powerCache[radix] = newCacheLine;
+    }
+    return cacheLine[exponent];
+}
+
+function smallToString(u, radix, s, digits) {
+    
+}
+
+function toString(u, s, radix, digits) {
+    if (u.mag.length <= SCHOENHAGE_BASE_CONVERSION_THRESHOLD) {
+        return smallToString(u, radix, s, digits);
+    }
+    var b = u.bitLength();
+    var n = Math.round(Math.log(b * LOG_TWO / logCache[radix]) / LOG_TWO - 1);
+    var v = getRadixConversionCache(radix, n);
+    var results = u.divideAndRemainder(v); // TODO
+    var expectedDigits = 1 << n;
+    // Now recursively build the two halves of each number
+    return toString(results[0], s, radix, digits - expectedDigits) +
+           toString(results[1], s, radix, expectedDigits);
 }
 
 class BigInteger {
@@ -300,6 +416,10 @@ class BigInteger {
         _NEGATIVE_ONE = BigInteger.valueOf(-1);
         _TEN = BigInteger.valueOf(10);
         _SMALL_PRIME_PRODUCT = new BigInteger(1, [0x8a5b, 0x6470af95])
+        for (var i = MIN_RADIX; i < MAX_RADIX; i++) {
+            powerCache[i] = [new BigInteger(1, [i])];
+            logCache[i] = Math.log(i);
+        }
     }
 
     /**
@@ -334,6 +454,10 @@ class BigInteger {
             }
             if (this.#mag.length >= MAX_MAG_LENGTH) checkRange(this.#mag);
         }
+        this.#bitCountPlusOne = 0;
+        this.#bitLengthPlusOne = 0;
+        this.#lowestSetBitPlusTwo = 0;
+        this.#firstNonzeroIntNumPlusTwo = 0;
     }
 
     /**
@@ -447,18 +571,76 @@ class BigInteger {
         return new BigInteger(signum, [n]);
     }
 
+    /**
+     * Private sum operation between this and another BigInteger.
+     * @param {BigInteger} val The BigInteger to add to this BigInteger.
+     * @returns A new BigInteger whose value is the sum of the two numbers.
+     */
     #addBigInteger(val) {
         if (val.#signum === 0) return this;
         if (this.#signum === 0) return val;
         if (this.#signum === val.#signum) {
             return new BigInteger(this.#signum, addMagnitudes(this.#mag, val.#mag));
         }
+        var cmp = compareMagnitudes(this.#mag, val.#mag);
+        if (cmp === 0) return ZERO;
+        var resultMag = cmp > 0 ? subtractMagnitudes(this.#mag, val.#mag)
+                                : subtractMagnitudes(val.#mag, this.#mag);
+        return new BigInteger(cmp * this.#signum, resultMag);
     }
 
+    /**
+     * Private sum operation between this and an integer.
+     * @param {number} val The number to add to this BigInteger.
+     */
     #addInteger(val) {
-
+        if (val === 0) return this;
+        if (this.#signum === 0) return BigInteger.valueOf(val);
+        if (this.#signum === val < 0 ? -1 : 1) {
+            return new BigInteger(this.#signum, addMagnitudes(this.#mag, [this.#signum * val]));
+        }
+        var cmp = compareMagnitudes(this.#mag, [val]);
+        if (cmp === 0) return _ZERO;
+        val = Math.abs(val)
+        var resultMag = cmp > 0 ? subtractMagnitudes(this.#mag, [val]) : subtractMagnitudes([val], this.#mag);
+        resultMag = stripLeadingZeroInts(resultMag, true);
+        return new BigInteger(cmp === this.#signum ? 1 : -1, resultMag);
     }
 
+    /**
+     * Private difference operation between this and another BigInteger.
+     * @param {BigInteger} val The BigInteger to subtract from this BigInteger.
+     * @returns A new BigInteger whose value is the difference of the two numbers.
+     */
+    #subtractBigInteger(val) {
+        if (val.#signum === 0) return this;
+        if (this.#signum === 0) return val.negate();
+        if (this.#signum !== val.#signum) {
+            return new BigInteger(this.#signum, addMagnitudes(this.#mag, val.#mag));
+        }
+        var cmp = compareMagnitudes(this.#mag, val.#mag);
+        if (cmp === 0) return ZERO;
+        var resultMag = cmp > 0 ? subtractMagnitudes(this.#mag, val.#mag)
+                                : subtractMagnitudes(val.#mag, this.#mag);
+        return new BigInteger(cmp === this.#signum ? 1 : -1, resultMag);
+    }
+
+    /**
+     * Private difference operation between this and an integer.
+     * @param {number} val The number to subtract from this BigInteger.
+     */
+    #subtractInteger(val) {
+        if (val === 0) return this;
+        if (this.#signum === 0) return BigInteger.valueOf(val).negate();
+        var resultMag = subtractFromMagnitude(this.#mag, val);
+        if (resultMag.length >= MAX_MAG_LENGTH) checkRange();
+        return new BigInteger(this.#signum, resultMag);
+    }
+
+    /**
+     * Returns a BigInteger whose value is this + val.
+     * @param {Object} val  The BigInteger or integer to add to this BigInteger.
+     */
     add(val) {
         if (val instanceof BigInteger) {
             return this.#addBigInteger(val);
@@ -467,6 +649,92 @@ class BigInteger {
         } else {
             throw new TypeError('Invalid argument type');
         }
+    }
+    
+    /**
+     * Returns a BigInteger whose value is this - val.
+     * @param {Object} val  The BigInteger or integer to subtract from this BigInteger.
+     */
+    subtract(val) {
+        if (val instanceof BigInteger) {
+            return this.#subtractBigInteger(val);
+        } else if (typeof val === 'number') {
+            return this.#subtractInteger(val);
+        } else {
+            throw new TypeError('Invalid argument type');
+        }
+    }
+    
+    /**
+     * Returns a BigInteger whose value is -this.
+     * @returns {BigInteger} -this
+     */
+    negate() {
+        if (this.#signum === 0) return this;
+        return new BigInteger(-this.#signum, this.#mag);
+    }
+
+    /**
+     * Returns a BigInteger whose value is the absolute value of this.
+     * @returns {BigInteger} abs(this)
+     */
+    abs() {
+        return this.#signum < 0 ? this.negate() : this;
+    }
+
+    /**
+     * Returns the number of bits in the minimal two's-complement representation of this BigInteger,
+     * excluding a sign bit. For positive BigIntegers, this is equivalent to the number of bits in
+     * the ordinary binary representation. For zero this method returns 0.
+     * @returns number of bits in the minimal two's-complement representation of this BigInteger,
+     *          excluding a sign bit.
+     */
+    bitLength() {
+        var n = this.#bitLengthPlusOne - 1;
+        if (n === -1) {
+            var m = this.#mag
+            var len = m.length;
+            if (len === 0) { 
+                n = 0;  // offset by one to initialize
+            } else {
+                var magBitLength = ((len - 1) << 5) + bitLengthForInt(m[0]);
+                if (signum < 0) {
+                    // Check if magnitude is a power of two
+                    var pow2 = bitCount(m[0]) === 1;
+                    for (var i = 1; i < len && pow2; i++) pow2 = m[i] === 0;
+                    n = pow2 ? magBitLength - 1 : magBitLength;
+                } else {
+                    n = magBitLength;
+                }
+            }
+            this.#bitLengthPlusOne = n + 1;
+        }
+        return n;
+    }
+    
+    pow(n) {
+
+    }
+    
+    #divideAndRemainderKnuth(val) {
+        var result = [ZERO, ZERO];
+    }
+
+    divideAndRemainder(val) {
+        if (val.#mag.length < BURNIKEL_ZIEGLER_THRESHOLD ||
+            this.#mag.length - val.#mag.length < BURNIKEL_ZIEGLER_OFFSET) {
+            return this.divideAndRemainderKnuth(val);
+        } else {
+            return this.divideAndRemainderBurnikelZiegler(val);
+        }
+    }
+
+    toString(radix = 10) {
+        if (signum === 0) return "0";
+        if (radix < MIN_RADIX || radix > MAX_RADIX) radix = 10;
+
+        var abs = this.abs();
+        return toString(abs, this.#signum < 0 ? "-" : "", radix, 0);  // TODO
     }
 }
 
